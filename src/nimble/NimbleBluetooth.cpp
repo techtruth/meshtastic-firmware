@@ -831,7 +831,12 @@ void NimbleBluetooth::shutdown()
 void NimbleBluetooth::deinit()
 {
 #ifdef ARCH_ESP32
-    LOG_INFO("Disable bluetooth until reboot");
+    if (!bleServer && nimbleBluetoothConnHandle.load() == BLE_HS_CONN_HANDLE_NONE) {
+        isDeInit = true;
+        return;
+    }
+
+    LOG_INFO("Disable bluetooth");
 
     // BLEDevice::deinit() deletes the BLEServer before nimble_port_stop(); doing that with a live
     // connection dispatches synthesized unsubscribe events into the freed server (LoadProhibited),

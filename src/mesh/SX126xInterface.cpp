@@ -21,6 +21,9 @@
 #ifndef SX126X_MAX_POWER
 #define SX126X_MAX_POWER 22
 #endif
+#ifndef SX126X_USE_REGULATOR_LDO
+#define SX126X_USE_REGULATOR_LDO 0
+#endif
 
 template <typename T>
 SX126xInterface<T>::SX126xInterface(LockingArduinoHal *hal, RADIOLIB_PIN_TYPE cs, RADIOLIB_PIN_TYPE irq, RADIOLIB_PIN_TYPE rst,
@@ -81,8 +84,8 @@ template <typename T> bool SX126xInterface<T>::init()
     else
         LOG_DEBUG("SX126X_DIO3_TCXO_VOLTAGE defined, using DIO3 as TCXO reference voltage at %f V", tcxoVoltage);
     setTransmitEnable(false);
-    // FIXME: May want to set depending on a definition, currently all SX126x variant files use the DC-DC regulator option
-    bool useRegulatorLDO = false; // Seems to depend on the connection to pin 9/DCC_SW - if an inductor DCDC?
+    bool useRegulatorLDO = SX126X_USE_REGULATOR_LDO;
+    LOG_DEBUG("SX126x regulator mode %s", useRegulatorLDO ? "LDO" : "DC-DC");
 
     RadioLibInterface::init();
 

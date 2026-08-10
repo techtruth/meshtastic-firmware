@@ -219,8 +219,8 @@ static void waitEnterSleep(bool skipPreflight, bool deepSleep)
     }
 
     // Code that still needs to be moved into notifyObservers
-    console->flush();          // send all our characters before we stop cpu clock
-    setBluetoothEnable(false); // has to be off before calling light sleep
+    console->flush(); // send all our characters before we stop cpu clock
+    setBluetoothEnable(false);
 }
 
 void doDeepSleep(uint32_t msecToWake, bool skipPreflight = false, bool skipSaveNodeDb = false)
@@ -237,7 +237,7 @@ void doDeepSleep(uint32_t msecToWake, bool skipPreflight = false, bool skipSaveN
 
 #if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_BLUETOOTH
     // Full shutdown of bluetooth hardware
-    if (nimbleBluetooth)
+    if (nimbleBluetooth && nimbleBluetooth->isActive())
         nimbleBluetooth->deinit();
 #endif
 

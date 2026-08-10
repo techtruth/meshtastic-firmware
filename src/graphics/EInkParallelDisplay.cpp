@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "FastEPD.h"
+#include "graphics/eink/T5S3V2EpdPower.h"
 
 // Thresholds for choosing partial vs full update
 #ifndef EPD_PARTIAL_THRESHOLD_ROWS
@@ -79,16 +80,18 @@ bool EInkParallelDisplay::connect()
     LOG_INFO("Do EPD init");
     int initRc = BBEP_SUCCESS;
     if (!epaper) {
+#if defined(T5_S3_EPAPER_PRO_V2)
+        auto *safeEpaper = new T5S3V2SafeFastEPD;
+        epaper = safeEpaper;
+#else
         epaper = new FASTEPD;
+#endif
 #if defined(T5_S3_EPAPER_PRO_V1)
         initRc = epaper->initPanel(BB_PANEL_LILYGO_T5PRO, 28000000);
 #elif defined(T5_S3_EPAPER_PRO_V2)
         initRc = epaper->initPanel(BB_PANEL_LILYGO_T5PRO_V2, 28000000);
-        // initialize all port 0 pins (0-7) as outputs / HIGH
-        for (int i = 0; i < 8; i++) {
-            epaper->ioPinMode(i, OUTPUT);
-            epaper->ioWrite(i, HIGH);
-        }
+        safeEpaper->installSafePowerHandler();
+        epaper->ioPinMode(BOARD_PCA9535_BUTTON, INPUT);
 #else
 #error "unsupported EPD device!"
 #endif

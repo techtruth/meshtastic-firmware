@@ -4,6 +4,10 @@
 #include "RadioLibInterface.h"
 #include "configuration.h"
 
+#ifndef SX126X_CURRENT_LIMIT
+#define SX126X_CURRENT_LIMIT 140
+#endif
+
 /**
  * \brief Adapter for SX126x radio family. Implements common logic for child classes.
  * \tparam T RadioLib module type for SX126x: SX1262, SX1268.
@@ -34,7 +38,7 @@ template <class T> class SX126xInterface : public RadioLibInterface
     void setTCXOVoltage(float voltage) { tcxoVoltage = voltage; }
 
   protected:
-    float currentLimit = 140; // Higher OCP limit for SX126x PA
+    float currentLimit = SX126X_CURRENT_LIMIT; // Higher OCP limit for SX126x PA
     float tcxoVoltage = 0.0;
 
     /**

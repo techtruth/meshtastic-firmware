@@ -13,6 +13,11 @@
 #include "sleep.h"
 #include <cstring>
 
+#ifdef ARCH_ESP32
+#include <driver/gpio.h>
+#include <esp_sleep.h>
+#endif
+
 #ifdef MESHTASTIC_INCLUDE_NICHE_GRAPHICS
 #include "graphics/niche/InkHUD/InkHUD.h"
 #include "graphics/niche/InkHUD/Persistence.h"
@@ -107,6 +112,305 @@ volatile bool homeCapButtonEventsEnabled = false;
 uint32_t lastTouchIndicatorMs = 0;
 #endif
 
+#if defined(BOARD_PCA9535_ADDR)
+constexpr uint8_t PCA9535_REG_INPUT0 = 0x00;
+constexpr uint8_t PCA9535_REG_INPUT1 = 0x01;
+constexpr uint8_t PCA9535_REG_OUTPUT0 = 0x02;
+constexpr uint8_t PCA9535_REG_OUTPUT1 = 0x03;
+constexpr uint8_t PCA9535_REG_POLARITY0 = 0x04;
+constexpr uint8_t PCA9535_REG_POLARITY1 = 0x05;
+constexpr uint8_t PCA9535_REG_CONFIG0 = 0x06;
+constexpr uint8_t PCA9535_REG_CONFIG1 = 0x07;
+
+bool writePca9535Register(uint8_t reg, uint8_t value)
+{
+    Wire.beginTransmission(BOARD_PCA9535_ADDR);
+    Wire.write(reg);
+    Wire.write(value);
+    return Wire.endTransmission() == 0;
+}
+
+bool readPca9535Register(uint8_t reg, uint8_t *value)
+{
+    if (!value) {
+        return false;
+    }
+
+    Wire.beginTransmission(BOARD_PCA9535_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) {
+        return false;
+    }
+    if (Wire.requestFrom((uint8_t)BOARD_PCA9535_ADDR, (uint8_t)1) != 1) {
+        return false;
+    }
+
+    *value = Wire.read();
+    return true;
+}
+
+#if !defined(T5_S3_EPAPER_PRO_V1)
+enum class Pca9535Direction : uint8_t {
+    Output,
+    Input,
+};
+
+enum class Pca9535BoardState : uint8_t {
+    Boot,
+    Normal,
+    Sleep,
+};
+
+constexpr int8_t PCA9535_NOT_DRIVEN = -1;
+
+struct H752V2Pca9535Signal {
+    uint8_t pin;
+    const char *name;
+    Pca9535Direction direction;
+    bool inverted;
+    int8_t bootValue;
+    int8_t normalValue;
+    int8_t sleepValue;
+    const char *owner;
+};
+
+static constexpr H752V2Pca9535Signal h752V2Pca9535Signals[] = {
+    {BOARD_PCA9535_LORA_GPS_EN, "LORA_EN", Pca9535Direction::Output, false, 1, 1, 0, "board LoRa/GPS rail"},
+    {BOARD_PCA9535_IO0_1_NC, "IO0_1_NC", Pca9535Direction::Output, false, 1, 1, 1, "unused port0 pin held high"},
+    {BOARD_PCA9535_IO0_2_NC, "IO0_2_NC", Pca9535Direction::Output, false, 1, 1, 1, "unused port0 pin held high"},
+    {BOARD_PCA9535_IO0_3_NC, "IO0_3_NC", Pca9535Direction::Output, false, 1, 1, 1, "unused port0 pin held high"},
+    {BOARD_PCA9535_IO0_4_NC, "IO0_4_NC", Pca9535Direction::Output, false, 1, 1, 1, "unused port0 pin held high"},
+    {BOARD_PCA9535_IO0_5_NC, "IO0_5_NC", Pca9535Direction::Output, false, 1, 1, 1, "unused port0 pin held high"},
+    {BOARD_PCA9535_IO0_6_NC, "IO0_6_NC", Pca9535Direction::Output, false, 1, 1, 1, "unused port0 pin held high"},
+    {BOARD_PCA9535_IO0_7_NC, "IO0_7_NC", Pca9535Direction::Output, false, 1, 1, 1, "unused port0 pin held high"},
+    {BOARD_PCA9535_EPD_OE, "EPD_OE", Pca9535Direction::Output, false, 0, 0, 0, "display/TPS65185"},
+    {BOARD_PCA9535_EPD_MODE, "EPD_MODE", Pca9535Direction::Output, false, 0, 0, 0, "display/TPS65185"},
+    {BOARD_PCA9535_BUTTON, "BUTTON", Pca9535Direction::Input, false, PCA9535_NOT_DRIVEN, PCA9535_NOT_DRIVEN,
+     PCA9535_NOT_DRIVEN, "side key"},
+    {BOARD_PCA9535_TPS_PWRUP, "TPS_PWRUP", Pca9535Direction::Output, false, 0, 0, 0, "display/TPS65185"},
+    {BOARD_PCA9535_EPD_VCOM_CTRL, "VCOM_CTRL", Pca9535Direction::Output, false, 0, 0, 0, "display/TPS65185"},
+    {BOARD_PCA9535_TPS_WAKEUP, "TPS_WAKEUP", Pca9535Direction::Output, false, 0, 0, 0, "display/TPS65185"},
+    {BOARD_PCA9535_TPS_PWR_GOOD, "TPS_PWR_GOOD", Pca9535Direction::Input, false, PCA9535_NOT_DRIVEN,
+     PCA9535_NOT_DRIVEN, PCA9535_NOT_DRIVEN, "display power-good"},
+    {BOARD_PCA9535_TPS_INT, "TPS_INT", Pca9535Direction::Input, false, PCA9535_NOT_DRIVEN, PCA9535_NOT_DRIVEN,
+     PCA9535_NOT_DRIVEN, "display/TPS65185 interrupt"},
+};
+
+constexpr bool pca9535SignalOnPort(const H752V2Pca9535Signal &signal, uint8_t port)
+{
+    return (signal.pin >> 3) == port;
+}
+
+constexpr uint8_t pca9535Bit(const H752V2Pca9535Signal &signal)
+{
+    return (uint8_t)(1u << (signal.pin & 0x07));
+}
+
+constexpr int8_t pca9535SignalValue(const H752V2Pca9535Signal &signal, Pca9535BoardState state)
+{
+    switch (state) {
+    case Pca9535BoardState::Boot:
+        return signal.bootValue;
+    case Pca9535BoardState::Normal:
+        return signal.normalValue;
+    case Pca9535BoardState::Sleep:
+        return signal.sleepValue;
+    }
+    return PCA9535_NOT_DRIVEN;
+}
+
+constexpr uint8_t buildPca9535Config(uint8_t port)
+{
+    uint8_t value = 0;
+    for (const auto &signal : h752V2Pca9535Signals) {
+        if (pca9535SignalOnPort(signal, port) && signal.direction == Pca9535Direction::Input) {
+            value |= pca9535Bit(signal);
+        }
+    }
+    return value;
+}
+
+constexpr uint8_t buildPca9535Polarity(uint8_t port)
+{
+    uint8_t value = 0;
+    for (const auto &signal : h752V2Pca9535Signals) {
+        if (pca9535SignalOnPort(signal, port) && signal.inverted) {
+            value |= pca9535Bit(signal);
+        }
+    }
+    return value;
+}
+
+constexpr uint8_t buildPca9535Output(uint8_t port, Pca9535BoardState state)
+{
+    uint8_t value = 0;
+    for (const auto &signal : h752V2Pca9535Signals) {
+        const int8_t stateValue = pca9535SignalValue(signal, state);
+        if (pca9535SignalOnPort(signal, port) && signal.direction == Pca9535Direction::Output && stateValue > 0) {
+            value |= pca9535Bit(signal);
+        }
+    }
+    return value;
+}
+
+static_assert(buildPca9535Polarity(0) == BOARD_PCA9535_PORT0_POLARITY, "H752 V2 port0 polarity mismatch");
+static_assert(buildPca9535Polarity(1) == BOARD_PCA9535_PORT1_POLARITY, "H752 V2 port1 polarity mismatch");
+static_assert(buildPca9535Config(0) == BOARD_PCA9535_PORT0_CONFIG, "H752 V2 port0 config mismatch");
+static_assert(buildPca9535Config(1) == BOARD_PCA9535_PORT1_CONFIG, "H752 V2 port1 config mismatch");
+static_assert(buildPca9535Output(0, Pca9535BoardState::Boot) == BOARD_PCA9535_PORT0_OUTPUT_BOOT,
+              "H752 V2 port0 boot output mismatch");
+static_assert(buildPca9535Output(0, Pca9535BoardState::Normal) == BOARD_PCA9535_PORT0_OUTPUT_NORMAL,
+              "H752 V2 port0 normal output mismatch");
+static_assert(buildPca9535Output(0, Pca9535BoardState::Sleep) == BOARD_PCA9535_PORT0_OUTPUT_SLEEP,
+              "H752 V2 port0 sleep output mismatch");
+static_assert(buildPca9535Output(1, Pca9535BoardState::Boot) == BOARD_PCA9535_PORT1_OUTPUT_BOOT,
+              "H752 V2 port1 boot output mismatch");
+static_assert(buildPca9535Output(1, Pca9535BoardState::Normal) == BOARD_PCA9535_PORT1_OUTPUT_EPD_OFF,
+              "H752 V2 port1 normal output mismatch");
+static_assert(buildPca9535Output(1, Pca9535BoardState::Sleep) == BOARD_PCA9535_PORT1_OUTPUT_SLEEP,
+              "H752 V2 port1 sleep output mismatch");
+
+const char *pca9535DirectionName(Pca9535Direction direction)
+{
+    return direction == Pca9535Direction::Input ? "input" : "output";
+}
+
+void logH752V2Pca9535Map()
+{
+    static bool logged = false;
+    if (logged) {
+        return;
+    }
+    logged = true;
+
+    for (const auto &signal : h752V2Pca9535Signals) {
+        LOG_DEBUG("H752 V2 PCA9535 pin %u %-13s %s boot=%d normal=%d sleep=%d owner=%s", signal.pin, signal.name,
+                  pca9535DirectionName(signal.direction), signal.bootValue, signal.normalValue, signal.sleepValue,
+                  signal.owner);
+    }
+}
+
+void forceBacklightOffForDeepSleep()
+{
+    backlightForcedBySleep = true;
+    pinMode(BOARD_BL_EN, OUTPUT);
+    applyBacklightState();
+}
+
+#ifdef ARCH_ESP32
+void holdOutputLowForDeepSleep(uint8_t pin)
+{
+    gpio_num_t gpio = (gpio_num_t)pin;
+    if (!GPIO_IS_VALID_OUTPUT_GPIO(gpio)) {
+        return;
+    }
+
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+    esp_err_t err = gpio_hold_en(gpio);
+    if (err != ESP_OK) {
+        LOG_WARN("H752 V2 gpio_hold_en(%u) failed: %d", pin, err);
+    }
+}
+
+void prepareH752V2DirectPinsForDeepSleep()
+{
+    holdOutputLowForDeepSleep(GT911_PIN_RST);
+    holdOutputLowForDeepSleep(LORA_RESET);
+    forceBacklightOffForDeepSleep();
+    gpio_deep_sleep_hold_en();
+}
+#else
+void prepareH752V2DirectPinsForDeepSleep()
+{
+    forceBacklightOffForDeepSleep();
+}
+#endif
+
+bool configurePca9535ForH752V2()
+{
+    bool ok = true;
+
+    logH752V2Pca9535Map();
+    ok = writePca9535Register(PCA9535_REG_POLARITY0, buildPca9535Polarity(0)) && ok;
+    ok = writePca9535Register(PCA9535_REG_POLARITY1, buildPca9535Polarity(1)) && ok;
+    ok = writePca9535Register(PCA9535_REG_OUTPUT0, buildPca9535Output(0, Pca9535BoardState::Boot)) && ok;
+    ok = writePca9535Register(PCA9535_REG_OUTPUT1, buildPca9535Output(1, Pca9535BoardState::Boot)) && ok;
+    ok = writePca9535Register(PCA9535_REG_CONFIG0, buildPca9535Config(0)) && ok;
+    ok = writePca9535Register(PCA9535_REG_CONFIG1, buildPca9535Config(1)) && ok;
+
+    uint8_t ignored = 0xFF;
+    (void)readPca9535Register(PCA9535_REG_INPUT0, &ignored);
+    (void)readPca9535Register(PCA9535_REG_INPUT1, &ignored); // clear any latched side-key/TPS interrupt
+
+    if (ok) {
+        LOG_INFO("H752 V2 PCA9535 initialized: port0=0x%02x config0=0x%02x port1=0x%02x config1=0x%02x",
+                 buildPca9535Output(0, Pca9535BoardState::Boot), buildPca9535Config(0),
+                 buildPca9535Output(1, Pca9535BoardState::Boot), buildPca9535Config(1));
+    } else {
+        LOG_WARN("H752 V2 PCA9535 init failed");
+    }
+
+    return ok;
+}
+
+bool setSharedLoraGpsRail(bool enabled)
+{
+    const uint8_t output0 = buildPca9535Output(0, enabled ? Pca9535BoardState::Normal : Pca9535BoardState::Sleep);
+    bool ok = writePca9535Register(PCA9535_REG_OUTPUT0, output0);
+    ok = writePca9535Register(PCA9535_REG_CONFIG0, buildPca9535Config(0)) && ok;
+    if (!ok) {
+        LOG_WARN("H752 V2 shared LoRa/GPS rail %s failed", enabled ? "enable" : "disable");
+    }
+    return ok;
+}
+
+struct BoardPowerSleepObserver {
+    void begin()
+    {
+        if (registered) {
+            return;
+        }
+        deepSleepObserver.observe(&notifyDeepSleep);
+#ifdef ARCH_ESP32
+        lightSleepObserver.observe(&notifyLightSleep);
+        lightSleepEndObserver.observe(&notifyLightSleepEnd);
+#endif
+        registered = true;
+    }
+
+    int onDeepSleep(void *)
+    {
+        prepareH752V2DirectPinsForDeepSleep();
+        setSharedLoraGpsRail(false);
+        return 0;
+    }
+
+#ifdef ARCH_ESP32
+    int onLightSleep(void *)
+    {
+        setSharedLoraGpsRail(true);
+        return 0;
+    }
+
+    int onLightSleepEnd(esp_sleep_wakeup_cause_t)
+    {
+        setSharedLoraGpsRail(true);
+        return 0;
+    }
+#endif
+
+    bool registered = false;
+    CallbackObserver<BoardPowerSleepObserver, void *> deepSleepObserver{this, &BoardPowerSleepObserver::onDeepSleep};
+#ifdef ARCH_ESP32
+    CallbackObserver<BoardPowerSleepObserver, void *> lightSleepObserver{this, &BoardPowerSleepObserver::onLightSleep};
+    CallbackObserver<BoardPowerSleepObserver, esp_sleep_wakeup_cause_t> lightSleepEndObserver{this,
+                                                                                              &BoardPowerSleepObserver::onLightSleepEnd};
+#endif
+} static boardPowerSleepObserver;
+#endif // !T5_S3_EPAPER_PRO_V1
+#endif // BOARD_PCA9535_ADDR
+
 void showTouchIndicator(const char *text)
 {
 #if HAS_SCREEN
@@ -132,21 +436,7 @@ void showTouchIndicator(const char *text)
 #if defined(BOARD_PCA9535_ADDR) && defined(BOARD_PCA9535_BUTTON_MASK)
 bool readPca9535Port1(uint8_t *value)
 {
-    if (!value) {
-        return false;
-    }
-
-    Wire.beginTransmission(BOARD_PCA9535_ADDR);
-    Wire.write((uint8_t)0x01); // input port 1
-    if (Wire.endTransmission(false) != 0) {
-        return false;
-    }
-    if (Wire.requestFrom((uint8_t)BOARD_PCA9535_ADDR, (uint8_t)1) != 1) {
-        return false;
-    }
-
-    *value = Wire.read();
-    return true;
+    return readPca9535Register(PCA9535_REG_INPUT1, value);
 }
 
 bool isPca9535SideKeyPressed()
@@ -505,6 +795,13 @@ void toggleTouchInputEnabled()
     setTouchInputEnabled(!touchInputEnabled, true);
 }
 
+void postI2CInitVariant()
+{
+#if defined(BOARD_PCA9535_ADDR) && !defined(T5_S3_EPAPER_PRO_V1)
+    configurePca9535ForH752V2();
+#endif
+}
+
 // Commands the GT911 into standby before the Wire bus is torn down.
 // notifyDeepSleep fires before Wire.end() in doDeepSleep(), so I2C is still available here.
 struct TouchDeepSleepObserver {
@@ -654,7 +951,7 @@ void lateInitVariant()
 {
     touch.setPins(GT911_PIN_RST, GT911_PIN_INT);
     if (touch.begin(Wire, GT911_SLAVE_ADDRESS_H, GT911_PIN_SDA, GT911_PIN_SCL)) {
-        // Match LilyGO sample behavior: GT911 center/home capacitive key callback.
+        // Wire the GT911 center/home capacitive key into Meshtastic input handling.
         touch.setHomeButtonCallback(
             [](void *user_data) {
 #ifdef MESHTASTIC_INCLUDE_NICHE_GRAPHICS
@@ -705,6 +1002,10 @@ void lateInitVariant()
         sideKeyThread = new SideKeyInterruptThread();
         sideKeyThread->begin();
     }
+#endif
+
+#if defined(BOARD_PCA9535_ADDR) && !defined(T5_S3_EPAPER_PRO_V1)
+    boardPowerSleepObserver.begin();
 #endif
 }
 #endif

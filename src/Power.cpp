@@ -1753,24 +1753,40 @@ class LipoCharger : public HasBatteryLevel
             if (result) {
                 LOG_INFO("PPM BQ25896 init succeeded");
                 // Set the minimum operating voltage. Below this voltage, the PPM will
-                // protect PPM->setSysPowerDownVoltage(3100);
+#ifdef BQ25896_SYS_POWER_DOWN_MV
+                PPM->setSysPowerDownVoltage(BQ25896_SYS_POWER_DOWN_MV);
+#endif
 
                 // Set input current limit, default is 500mA
-                // PPM->setInputCurrentLimit(800);
+#ifdef BQ25896_INPUT_CURRENT_LIMIT_MA
+                PPM->setInputCurrentLimit(BQ25896_INPUT_CURRENT_LIMIT_MA);
+#endif
 
                 // Disable current limit pin
-                // PPM->disableCurrentLimitPin();
+#if defined(BQ25896_DISABLE_CURRENT_LIMIT_PIN) && BQ25896_DISABLE_CURRENT_LIMIT_PIN
+                PPM->disableCurrentLimitPin();
+#endif
 
                 // Set the charging target voltage, Range:3840 ~ 4608mV ,step:16 mV
+#ifdef BQ25896_CHARGE_TARGET_MV
+                PPM->setChargeTargetVoltage(BQ25896_CHARGE_TARGET_MV);
+#else
                 PPM->setChargeTargetVoltage(4288);
+#endif
 
                 // Set the precharge current , Range: 64mA ~ 1024mA ,step:64mA
-                // PPM->setPrechargeCurr(64);
+#ifdef BQ25896_PRECHARGE_CURRENT_MA
+                PPM->setPrechargeCurr(BQ25896_PRECHARGE_CURRENT_MA);
+#endif
 
                 // The premise is that limit pin is disabled, or it will
                 // only follow the maximum charging current set by limit pin.
                 // Set the charging current , Range:0~5056mA ,step:64mA
+#ifdef BQ25896_CHARGE_CURRENT_MA
+                PPM->setChargerConstantCurr(BQ25896_CHARGE_CURRENT_MA);
+#else
                 PPM->setChargerConstantCurr(1024);
+#endif
 
                 // To obtain voltage data, the ADC must be enabled first
                 PPM->enableMeasure();
@@ -1779,6 +1795,11 @@ class LipoCharger : public HasBatteryLevel
                 // If there is no battery connected, do not turn on the charging
                 // function
                 PPM->enableCharge();
+
+#if defined(BQ25896_CYCLE_OTG_AFTER_INIT) && BQ25896_CYCLE_OTG_AFTER_INIT
+                PPM->enableOTG();
+                PPM->disableOTG();
+#endif
             } else {
                 LOG_WARN("PPM BQ25896 init failed");
                 delete PPM;

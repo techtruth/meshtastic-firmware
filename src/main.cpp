@@ -319,6 +319,9 @@ __attribute__((weak, noinline)) bool loopCanSleep()
 void lateInitVariant() __attribute__((weak));
 void lateInitVariant() {}
 
+void postI2CInitVariant() __attribute__((weak));
+void postI2CInitVariant() {}
+
 void earlyInitVariant() __attribute__((weak));
 void earlyInitVariant() {}
 
@@ -604,6 +607,8 @@ void setup()
     Wire.begin();
 #endif
 #endif
+
+    postI2CInitVariant();
 
 #if defined(M5STACK_UNITC6L)
     pinMode(LORA_CS, OUTPUT);

@@ -93,7 +93,15 @@ static const char *getBluetoothReleaseReason()
 #if !defined(CONFIG_IDF_TARGET_ESP32S2) && !MESHTASTIC_EXCLUDE_BLUETOOTH
 void setBluetoothEnable(bool enable)
 {
-    if (enable && bluetoothMemoryReleased) {
+    if (!enable) {
+        if (nimbleBluetooth && nimbleBluetooth->isActive()) {
+            powerMon->clearState(meshtastic_PowerMon_State_BT_On);
+            nimbleBluetooth->deinit();
+        }
+        return;
+    }
+
+    if (bluetoothMemoryReleased) {
         if (!shouldReleaseBluetoothMemory() && !bluetoothMemoryReleaseWarned) {
             bluetoothMemoryReleaseWarned = true;
             LOG_WARN("Bluetooth memory has been released; reboot to re-enable Bluetooth");
@@ -101,24 +109,25 @@ void setBluetoothEnable(bool enable)
         return;
     }
 
+    bool canUseBluetooth = false;
 #if defined(USE_WS5500) || defined(USE_CH390D)
-    if ((config.bluetooth.enabled == true) && (config.network.wifi_enabled == false))
+    canUseBluetooth = config.bluetooth.enabled == true && config.network.wifi_enabled == false;
 #elif HAS_WIFI
-    if (!isWifiAvailable() && config.bluetooth.enabled == true)
+    canUseBluetooth = !isWifiAvailable() && config.bluetooth.enabled == true;
 #else
-    if (config.bluetooth.enabled == true)
+    canUseBluetooth = config.bluetooth.enabled == true;
 #endif
-    {
-        if (!nimbleBluetooth) {
-            nimbleBluetooth = new NimbleBluetooth();
-        }
-        if (enable && !nimbleBluetooth->isActive()) {
-            powerMon->setState(meshtastic_PowerMon_State_BT_On);
-            nimbleBluetooth->setup();
-        }
-        // For ESP32, no way to recover from bluetooth shutdown without reboot
-        // BLE advertising automatically stops when MCU enters light-sleep(?)
-        // For deep-sleep, shutdown hardware with nimbleBluetooth->deinit(). Requires reboot to reverse
+    if (!canUseBluetooth) {
+        return;
+    }
+
+    if (!nimbleBluetooth) {
+        nimbleBluetooth = new NimbleBluetooth();
+    }
+
+    if (!nimbleBluetooth->isActive()) {
+        powerMon->setState(meshtastic_PowerMon_State_BT_On);
+        nimbleBluetooth->setup();
     }
 }
 #else
