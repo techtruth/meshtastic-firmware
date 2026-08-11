@@ -61,8 +61,10 @@ void ED047TC1::begin(SPIClass *spi, uint8_t pin_dc, uint8_t pin_cs, uint8_t pin_
 #error "ED047TC1 driver: unsupported variant - define T5_S3_EPAPER_PRO_V1 or T5_S3_EPAPER_PRO_V2"
 #endif
 
-    if (initRc != BBEP_SUCCESS) {
-        LOG_ERROR("ED047TC1 initPanel failed rc=%d", initRc);
+    if (initRc != BBEP_SUCCESS || epaper->currentBuffer() == nullptr) {
+        LOG_ERROR("ED047TC1 initPanel failed rc=%d; running headless", initRc);
+        delete epaper;
+        epaper = nullptr;
         return;
     }
 
@@ -92,11 +94,15 @@ void ED047TC1::update(uint8_t *imageData, UpdateTypes type)
     // InkHUD renders into a DISPLAY_WIDTH × DISPLAY_HEIGHT safe-area buffer.
     // We need to place that into the centre of the physical 960×540 FastEPD buffer,
     // leaving blank margins at every edge to avoid the panel's inactive border.
-    const uint32_t srcRowBytes = (DISPLAY_WIDTH + 7) / 8; // bytes per row in InkHUD buffer (118)
+    const uint32_t srcRowBytes = (DISPLAY_WIDTH + 7) / 8; // bytes per row in InkHUD buffer (116)
     const uint32_t dstRowBytes = (960 + 7) / 8;           // bytes per row in physical buffer (120)
     const uint32_t dstTotalRows = 540;
 
     uint8_t *cur = epaper->currentBuffer();
+    if (cur == nullptr) {
+        LOG_ERROR("ED047TC1 framebuffer unavailable; skipping update");
+        return;
+    }
 
     // Fill physical buffer with white (0xFF = white in FastEPD 1bpp)
     memset(cur, 0xFF, dstRowBytes * dstTotalRows);

@@ -99,6 +99,10 @@ void ED047TC1::update(uint8_t *imageData, UpdateTypes type)
     const uint32_t dstTotalRows = 540;
 
     uint8_t *cur = epaper->currentBuffer();
+    if (cur == nullptr) {
+        LOG_ERROR("ED047TC1 framebuffer unavailable; skipping update");
+        return;
+    }
 
     // Fill physical buffer with white (0xFF = white in FastEPD 1bpp)
     memset(cur, 0xFF, dstRowBytes * dstTotalRows);
