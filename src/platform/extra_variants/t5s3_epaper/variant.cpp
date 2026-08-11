@@ -185,8 +185,8 @@ static constexpr H752V2Pca9535Signal h752V2Pca9535Signals[] = {
     {BOARD_PCA9535_IO0_7_NC, "IO0_7_NC", Pca9535Direction::Output, false, 1, 1, 1, "unused port0 pin held high"},
     {BOARD_PCA9535_EPD_OE, "EPD_OE", Pca9535Direction::Output, false, 0, 0, 0, "display/TPS65185"},
     {BOARD_PCA9535_EPD_MODE, "EPD_MODE", Pca9535Direction::Output, false, 0, 0, 0, "display/TPS65185"},
-    {BOARD_PCA9535_BUTTON, "BUTTON", Pca9535Direction::Input, false, PCA9535_NOT_DRIVEN, PCA9535_NOT_DRIVEN,
-     PCA9535_NOT_DRIVEN, "side key"},
+    {BOARD_PCA9535_BUTTON, "IO48_KEY", Pca9535Direction::Input, false, PCA9535_NOT_DRIVEN, PCA9535_NOT_DRIVEN,
+     PCA9535_NOT_DRIVEN, "PCA9535 IO1_2 function key"},
     {BOARD_PCA9535_TPS_PWRUP, "TPS_PWRUP", Pca9535Direction::Output, false, 0, 0, 0, "display/TPS65185"},
     {BOARD_PCA9535_EPD_VCOM_CTRL, "VCOM_CTRL", Pca9535Direction::Output, false, 0, 0, 0, "display/TPS65185"},
     {BOARD_PCA9535_TPS_WAKEUP, "TPS_WAKEUP", Pca9535Direction::Output, false, 0, 0, 0, "display/TPS65185"},
@@ -341,7 +341,7 @@ bool configurePca9535ForH752V2()
 
     uint8_t ignored = 0xFF;
     (void)readPca9535Register(PCA9535_REG_INPUT0, &ignored);
-    (void)readPca9535Register(PCA9535_REG_INPUT1, &ignored); // clear any latched side-key/TPS interrupt
+    (void)readPca9535Register(PCA9535_REG_INPUT1, &ignored); // clear any latched IO48-key/TPS interrupt
 
     if (ok) {
         LOG_INFO("H752 V2 PCA9535 initialized: port0=0x%02x config0=0x%02x port1=0x%02x config1=0x%02x",
@@ -439,7 +439,7 @@ bool readPca9535Port1(uint8_t *value)
     return readPca9535Register(PCA9535_REG_INPUT1, value);
 }
 
-bool isPca9535SideKeyPressed()
+bool isPca9535Io48KeyPressed()
 {
     uint8_t port1 = 0xFF;
     if (!readPca9535Port1(&port1)) {
@@ -449,10 +449,10 @@ bool isPca9535SideKeyPressed()
     return (port1 & BOARD_PCA9535_BUTTON_MASK) == 0;
 }
 
-class SideKeyInterruptThread : public concurrency::OSThread
+class Pca9535KeyInterruptThread : public concurrency::OSThread
 {
   public:
-    SideKeyInterruptThread() : concurrency::OSThread("t5s3SideKeyInt", SAMPLE_MS)
+    Pca9535KeyInterruptThread() : concurrency::OSThread("t5s3PCA9535Int", SAMPLE_MS)
     {
         // Do not run unless an edge arrives.
         OSThread::disable();
@@ -466,7 +466,7 @@ class SideKeyInterruptThread : public concurrency::OSThread
     void begin()
     {
         pinMode(BOARD_PCA9535_INT, INPUT_PULLUP);
-        attachInterrupt(BOARD_PCA9535_INT, SideKeyInterruptThread::isr, FALLING);
+        attachInterrupt(BOARD_PCA9535_INT, Pca9535KeyInterruptThread::isr, FALLING);
     }
 
   protected:
@@ -484,20 +484,20 @@ class SideKeyInterruptThread : public concurrency::OSThread
             return OSThread::disable();
         }
 
-        // Ignore side-key handling while BOOT/user button is held.
+        // Ignore IO48-key handling while BOOT/user button is held.
         if (digitalRead(BUTTON_PIN) == LOW) {
             resetStateAndStop();
             return OSThread::disable();
         }
 
         switch (state) {
-        case State::IRQ_PENDING:
+        case State::IRQ_PENDING: {
             // Initial debounce after expander interrupt edge.
             if ((uint32_t)(now - irqAtMs) < DEBOUNCE_MS) {
                 return SAMPLE_MS;
             }
 
-            if (isPca9535SideKeyPressed()) {
+            if (isPca9535Io48KeyPressed()) {
                 state = State::PRESSED;
                 pressStartMs = now;
                 return SAMPLE_MS;
@@ -506,12 +506,14 @@ class SideKeyInterruptThread : public concurrency::OSThread
             // Spurious/cleared edge.
             resetStateAndStop();
             return OSThread::disable();
+        }
 
         case State::PRESSED: {
-            if (isPca9535SideKeyPressed()) {
+            if (isPca9535Io48KeyPressed()) {
                 // Fire long-press action as soon as threshold is reached, without waiting for release.
                 if (!longPressFired && (uint32_t)(now - pressStartMs) >= LONG_PRESS_MIN_MS &&
                     (uint32_t)(now - lastActionMs) >= ACTION_COOLDOWN_MS) {
+                    LOG_INFO("H752 V2 IO48 key long press: toggle backlight");
                     t5BacklightToggleUser();
                     longPressFired = true;
                     lastActionMs = now;
@@ -524,9 +526,11 @@ class SideKeyInterruptThread : public concurrency::OSThread
             if (!longPressFired && heldMs >= SHORT_PRESS_MIN_MS && (uint32_t)(now - lastActionMs) >= ACTION_COOLDOWN_MS) {
                 // If timeout forced touch/backlight off, short-press acts as a wake action first.
                 if (t5TouchIsForcedByTimeout()) {
+                    LOG_INFO("H752 V2 IO48 key short press: resume touch/backlight");
                     t5TouchHandleUserInput();
                     t5BacklightHandleUserInput();
                 } else {
+                    LOG_INFO("H752 V2 IO48 key short press: toggle touch input");
                     toggleTouchInputEnabled();
                 }
                 lastActionMs = now;
@@ -555,7 +559,7 @@ class SideKeyInterruptThread : public concurrency::OSThread
     static constexpr uint32_t LONG_PRESS_MIN_MS = 450;
     static constexpr uint32_t ACTION_COOLDOWN_MS = 180;
 
-    static SideKeyInterruptThread *instance;
+    static Pca9535KeyInterruptThread *instance;
 
     static void isr()
     {
@@ -604,8 +608,6 @@ class SideKeyInterruptThread : public concurrency::OSThread
     int onLightSleep(void *)
     {
         detachInterrupt(BOARD_PCA9535_INT);
-        // Clear any latched PCA9535 interrupt before enabling GPIO wake.
-        // If INT is left asserted low, light sleep exits immediately.
         uint8_t ignored = 0xFF;
         (void)readPca9535Port1(&ignored);
         resetStateAndStop();
@@ -615,18 +617,18 @@ class SideKeyInterruptThread : public concurrency::OSThread
     int onLightSleepEnd(esp_sleep_wakeup_cause_t cause)
     {
         (void)cause;
-        // Consume any pending interrupt source before reattaching ISR.
+        // Consume any pending interrupt source before reattaching the awake-mode ISR.
         uint8_t ignored = 0xFF;
         (void)readPca9535Port1(&ignored);
         pinMode(BOARD_PCA9535_INT, INPUT_PULLUP);
-        attachInterrupt(BOARD_PCA9535_INT, SideKeyInterruptThread::isr, FALLING);
+        attachInterrupt(BOARD_PCA9535_INT, Pca9535KeyInterruptThread::isr, FALLING);
 
         return 0;
     }
 
-    CallbackObserver<SideKeyInterruptThread, void *> lsObserver{this, &SideKeyInterruptThread::onLightSleep};
-    CallbackObserver<SideKeyInterruptThread, esp_sleep_wakeup_cause_t> lsEndObserver{this,
-                                                                                     &SideKeyInterruptThread::onLightSleepEnd};
+    CallbackObserver<Pca9535KeyInterruptThread, void *> lsObserver{this, &Pca9535KeyInterruptThread::onLightSleep};
+    CallbackObserver<Pca9535KeyInterruptThread, esp_sleep_wakeup_cause_t> lsEndObserver{
+        this, &Pca9535KeyInterruptThread::onLightSleepEnd};
 #endif
 
     volatile State state = State::REST;
@@ -636,8 +638,8 @@ class SideKeyInterruptThread : public concurrency::OSThread
     uint32_t lastActionMs = 0;
 };
 
-SideKeyInterruptThread *SideKeyInterruptThread::instance = nullptr;
-SideKeyInterruptThread *sideKeyThread = nullptr;
+Pca9535KeyInterruptThread *Pca9535KeyInterruptThread::instance = nullptr;
+Pca9535KeyInterruptThread *pca9535KeyThread = nullptr;
 #endif
 
 #ifdef MESHTASTIC_INCLUDE_NICHE_GRAPHICS
@@ -997,10 +999,10 @@ void lateInitVariant()
     }
 
 #if defined(BOARD_PCA9535_ADDR) && defined(BOARD_PCA9535_BUTTON_MASK)
-    // Start side-key interrupt handling after touch init is complete.
-    if (!sideKeyThread) {
-        sideKeyThread = new SideKeyInterruptThread();
-        sideKeyThread->begin();
+    // Start IO48-key interrupt handling after touch init is complete.
+    if (!pca9535KeyThread) {
+        pca9535KeyThread = new Pca9535KeyInterruptThread();
+        pca9535KeyThread->begin();
     }
 #endif
 

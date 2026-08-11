@@ -864,7 +864,9 @@ void NimbleBluetooth::deinit()
     digitalWrite(BLE_LED, LED_STATE_OFF);
 #endif
 
-    BLEDevice::deinit(true);
+    // Keep BT controller memory reserved so BLE can be initialized again after light sleep.
+    // Releasing it here is irreversible on this boot and can crash the next BLEDevice::init().
+    BLEDevice::deinit(false);
     bleServer = nullptr;             // deleted by deinit(); clear the dangling copy
     BatteryCharacteristic = nullptr; // freed by deinit; clear so updateBatteryLevel() won't touch it
     fromNumCharacteristic = nullptr; // freed by deinit; a late onNowHasData() must not notify freed memory

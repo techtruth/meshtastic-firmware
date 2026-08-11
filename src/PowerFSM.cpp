@@ -128,6 +128,17 @@ static void shutdownEnter()
 
 static uint32_t secsSlept;
 
+#ifdef ARCH_ESP32
+static bool configuredGpioButtonPressed()
+{
+#ifdef BUTTON_PIN
+    return !digitalRead(config.device.button_gpio ? config.device.button_gpio : BUTTON_PIN);
+#else
+    return false;
+#endif
+}
+#endif
+
 static void lsEnter()
 {
     LOG_POWERFSM("lsEnter begin, ls_secs=%u", config.power.ls_secs);
@@ -173,15 +184,19 @@ static void lsIdle()
                 powerFSM.trigger(EVENT_SERIAL_CONNECTED);
                 break;
 
+            case ESP_SLEEP_WAKEUP_UNDEFINED:
+                if (configuredGpioButtonPressed()) {
+                    powerFSM.trigger(EVENT_PRESS);
+                } else {
+                    LOG_WARN("Light sleep entry was rejected; exiting LS to service pending wake source");
+                    powerFSM.trigger(EVENT_WAKE_TIMER);
+                }
+                break;
+
             default:
                 // We woke for some other reason (button press, device IRQ interrupt)
 
-#ifdef BUTTON_PIN
-                bool pressed = !digitalRead(config.device.button_gpio ? config.device.button_gpio : BUTTON_PIN);
-#else
-                bool pressed = false;
-#endif
-                if (pressed) { // If we woke because of press, instead generate a PRESS event.
+                if (configuredGpioButtonPressed()) { // If we woke because of press, instead generate a PRESS event.
                     powerFSM.trigger(EVENT_PRESS);
                 } else {
                     // Otherwise let the NB state handle the IRQ (and that state will handle stuff like IRQs etc)
