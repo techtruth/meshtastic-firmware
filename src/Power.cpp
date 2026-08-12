@@ -1867,9 +1867,63 @@ class LipoCharger : public HasBatteryLevel
         }
         return isCharging;
     }
+
+#ifdef HAS_BQ27220
+    bool getTelemetry(LipoBatteryTelemetry &telemetry)
+    {
+        telemetry = {};
+        if (!PPM || !bq)
+            return false;
+
+        BQ27220BatteryStatus batt;
+        if (!bq->getBatteryStatus(&batt))
+            return false;
+
+        telemetry.chargerReady = true;
+        telemetry.gaugeReady = true;
+
+        telemetry.chargerVbusIn = PPM->isVbusIn();
+        telemetry.chargerCharging = PPM->isCharging();
+        telemetry.chargerChargeDone = PPM->isChargeDone();
+        telemetry.chargerVbusMv = PPM->getVbusVoltage();
+        telemetry.chargerVsysMv = PPM->getSystemVoltage();
+        telemetry.chargerVbatMv = PPM->getBattVoltage();
+        telemetry.chargerTargetMv = PPM->getChargeTargetVoltage();
+        telemetry.chargerInputLimitMa = PPM->getInputCurrentLimit();
+        telemetry.chargerFastLimitMa = PPM->getChargerConstantCurr();
+        telemetry.chargerPrechargeMa = PPM->getPrechargeCurr();
+        telemetry.chargerCurrentMa = telemetry.chargerCharging ? PPM->getChargeCurrent() : 0;
+        telemetry.chargerStatus = PPM->getChargeStatusString();
+        telemetry.chargerBusStatus = PPM->getBusStatusString();
+        telemetry.chargerNtcStatus = PPM->getNTCStatusString();
+
+        telemetry.gaugeCharging = !batt.reg.DSG;
+        telemetry.gaugeStatus = batt.full;
+        telemetry.gaugeVoltageMv = bq->getVoltage();
+        telemetry.gaugeCurrentMa = bq->getCurrent();
+        telemetry.gaugeTemperatureDk = bq->getTemperature();
+        telemetry.gaugeRemainingMah = bq->getRemainingCapacity();
+        telemetry.gaugeFullMah = bq->getFullChargeCapacity();
+        telemetry.gaugeDesignMah = bq->getDesignCapacity();
+        telemetry.gaugeSocPct = bq->getStateOfCharge();
+        telemetry.gaugeSohPct = bq->getStateOfHealth();
+        telemetry.gaugeTimeToFullMin = bq->getTimeToFull();
+        telemetry.gaugeTimeToEmptyMin = bq->getTimeToEmpty();
+        telemetry.gaugeChargeDone = !(batt.reg.DSG || telemetry.gaugeCurrentMa);
+
+        return true;
+    }
+#endif
 };
 
 LipoCharger lipoCharger;
+
+#ifdef HAS_BQ27220
+bool getLipoBatteryTelemetry(LipoBatteryTelemetry &telemetry)
+{
+    return lipoCharger.getTelemetry(telemetry);
+}
+#endif
 
 /**
  * Init the Lipo battery charger

@@ -83,6 +83,44 @@ extern RAK9154Sensor rak9154Sensor;
 extern XPowersLibInterface *PMU;
 #endif
 
+#if defined(HAS_PPM) && HAS_PPM && defined(HAS_BQ27220)
+struct LipoBatteryTelemetry {
+    bool chargerReady = false;
+    bool gaugeReady = false;
+
+    bool chargerVbusIn = false;
+    bool chargerCharging = false;
+    bool chargerChargeDone = false;
+    uint16_t chargerVbusMv = 0;
+    uint16_t chargerVsysMv = 0;
+    uint16_t chargerVbatMv = 0;
+    uint16_t chargerTargetMv = 0;
+    uint16_t chargerInputLimitMa = 0;
+    uint16_t chargerFastLimitMa = 0;
+    uint16_t chargerPrechargeMa = 0;
+    uint16_t chargerCurrentMa = 0;
+    const char *chargerStatus = nullptr;
+    const char *chargerBusStatus = nullptr;
+    const char *chargerNtcStatus = nullptr;
+
+    bool gaugeCharging = false;
+    bool gaugeChargeDone = false;
+    uint16_t gaugeStatus = 0;
+    uint16_t gaugeVoltageMv = 0;
+    int16_t gaugeCurrentMa = 0;
+    uint16_t gaugeTemperatureDk = 0;
+    uint16_t gaugeRemainingMah = 0;
+    uint16_t gaugeFullMah = 0;
+    uint16_t gaugeDesignMah = 0;
+    uint16_t gaugeSocPct = 0;
+    uint16_t gaugeSohPct = 0;
+    uint16_t gaugeTimeToFullMin = 0;
+    uint16_t gaugeTimeToEmptyMin = 0;
+};
+
+bool getLipoBatteryTelemetry(LipoBatteryTelemetry &telemetry);
+#endif
+
 class Power : public concurrency::OSThread
 {
 
