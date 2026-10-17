@@ -1,13 +1,17 @@
 #include "./EInk.h"
+#include "./PackedPixels.h"
 
 #ifdef MESHTASTIC_INCLUDE_NICHE_GRAPHICS
 
 using namespace NicheGraphics::Drivers;
 
 // Separate from EInk::begin method, as derived class constructors can probably supply these parameters as constants
-EInk::EInk(uint16_t width, uint16_t height, UpdateTypes supported)
-    : concurrency::OSThread("EInkDriver"), width(width), height(height), supportedUpdateTypes(supported)
+EInk::EInk(uint16_t width, uint16_t height, UpdateTypes supported, uint8_t pixelDepths)
+    : concurrency::OSThread("EInkDriver"), width(width), height(height), supportedUpdateTypes(supported),
+      supportedPixelDepths(pixelDepths)
 {
+    assert(pixelDepths > 0 && pixelDepths <= (BPP_1 | BPP_2 | BPP_4));
+    selectedPixelDepth = supportsPixelDepth(BPP_1) ? BPP_1 : (supportsPixelDepth(BPP_2) ? BPP_2 : BPP_4);
     OSThread::disable();
 }
 
@@ -20,6 +24,19 @@ bool EInk::supports(UpdateTypes type)
         return true;
     else
         return false;
+}
+
+bool EInk::supportsPixelDepth(uint8_t depth) const
+{
+    return PackedPixels::supports(supportedPixelDepths, depth);
+}
+
+bool EInk::setPixelDepth(uint8_t depth)
+{
+    if (!supportsPixelDepth(depth) || (pixelDepthLocked && depth != selectedPixelDepth))
+        return false;
+    selectedPixelDepth = depth;
+    return true;
 }
 
 // Begins using the OSThread to detect when a display update is complete

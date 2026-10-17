@@ -7,6 +7,9 @@
 #include "./Applet.h"
 #include "./SystemApplet.h"
 #include "./Tile.h"
+#include "graphics/niche/Drivers/EInk/PackedPixels.h"
+
+#include <stdlib.h>
 
 using namespace NicheGraphics;
 
@@ -34,14 +37,19 @@ void InkHUD::Renderer::setDriver(Drivers::EInk *driver)
     // Store the driver which was created in setupNicheGraphics()
     this->driver = driver;
 
-    // Determine the dimensions of the image buffer, in bytes.
-    // Along rows, pixels are stored 8 per byte.
-    // Not all display widths are divisible by 8. Need to make sure bytecount accommodates padding for these.
-    imageBufferWidth = ((driver->width - 1) / 8) + 1;
+    pixelDepth = driver->pixelDepth();
+    driver->lockPixelDepth();
+    imageBufferWidth = Drivers::PackedPixels::rowBytes(driver->width, pixelDepth);
     imageBufferHeight = driver->height;
+    imageBufferSize = imageBufferWidth * imageBufferHeight;
 
-    // Allocate the image buffer
-    imageBuffer = new uint8_t[imageBufferWidth * imageBufferHeight];
+#if defined(ARCH_ESP32)
+    imageBuffer = static_cast<uint8_t *>(ps_malloc(imageBufferSize));
+#endif
+    if (!imageBuffer)
+        imageBuffer = static_cast<uint8_t *>(malloc(imageBufferSize));
+    assert(imageBuffer);
+    clearBuffer();
 }
 
 // Set the target number of FAST display updates in a row, before a FULL update is used for display health
@@ -117,10 +125,16 @@ void InkHUD::Renderer::handlePixel(int16_t x, int16_t y, Color c)
 {
     rotatePixelCoords(&x, &y);
 
-    uint32_t byteNum = (y * imageBufferWidth) + (x / 8); // X data is 8 pixels per byte
-    uint8_t bitNum = 7 - (x % 8); // Invert order: leftmost bit (most significant) is leftmost pixel of byte.
+    if (x < 0 || y < 0 || x >= driver->width || y >= driver->height)
+        return;
+    writeBufferPixel(x, y, static_cast<uint8_t>(c));
+}
 
-    bitWrite(imageBuffer[byteNum], bitNum, c);
+void InkHUD::Renderer::writeBufferPixel(uint16_t x, uint16_t y, uint8_t color)
+{
+    const uint8_t pixelsPerByte = Drivers::PackedPixels::pixelsPerByte(pixelDepth);
+    uint8_t &target = imageBuffer[y * imageBufferWidth + x / pixelsPerByte];
+    Drivers::PackedPixels::writeMsb(target, x % pixelsPerByte, pixelDepth, color);
 }
 
 // Width of the display, relative to rotation
@@ -219,6 +233,8 @@ void InkHUD::Renderer::render(bool async)
         // Decide which technique the display will use to change image
         // Done early, as rendering resets the Applets' requested types
         Drivers::EInk::UpdateTypes updateType = decideUpdateType();
+        if (pixelDepth != Drivers::EInk::BPP_1)
+            updateType = Drivers::EInk::FULL;
 
         // Render the new image
         if (renderAll)
@@ -229,7 +245,7 @@ void InkHUD::Renderer::render(bool async)
 
         // Invert Buffer if set by user
         if (config.display.displaymode == meshtastic_Config_DisplayConfig_DisplayMode_INVERTED) {
-            for (size_t i = 0; i < imageBufferWidth * imageBufferHeight; ++i) {
+            for (size_t i = 0; i < imageBufferSize; ++i) {
                 imageBuffer[i] = ~imageBuffer[i];
             }
         }
@@ -260,7 +276,7 @@ void InkHUD::Renderer::render(bool async)
 // rather than rendering selectively, and manually blanking a portion of the display
 void InkHUD::Renderer::clearBuffer()
 {
-    memset(imageBuffer, 0xFF, imageBufferHeight * imageBufferWidth);
+    memset(imageBuffer, 0xFF, imageBufferSize);
 }
 
 // Manually clear the pixels below a tile
@@ -310,25 +326,13 @@ void InkHUD::Renderer::clearTile(Tile *t)
     if (yEnd > driver->height)
         yEnd = driver->height;
 
-    // Clear the pixels
-    if (xStart == 0 && xEnd == driver->width) { // full width box is easier to clear
+    if (xStart == 0 && xEnd == driver->width) {
         memset(imageBuffer + (yStart * imageBufferWidth), 0xFF, (yEnd - yStart) * imageBufferWidth);
     } else {
-        const uint16_t byteStart = (xStart / 8) + 1;
-        const uint16_t byteEnd = xEnd / 8;
-        const uint8_t leadingByte = 0xFF >> (xStart - ((byteStart - 1) * 8));
-        const uint8_t trailingByte = (0xFF00 >> (xEnd - (byteEnd * 8))) & 0xFF;
-        for (uint16_t i = yStart * imageBufferWidth; i < yEnd * imageBufferWidth; i += imageBufferWidth) {
-            // Set the leading byte
-            imageBuffer[i + byteStart - 1] |= leadingByte;
-
-            // Set the continuous bytes
-            if (byteStart < byteEnd)
-                memset(imageBuffer + i + byteStart, 0xFF, byteEnd - byteStart);
-
-            // Set the trailing byte
-            if (byteEnd != imageBufferWidth)
-                imageBuffer[i + byteEnd] |= trailingByte;
+        const uint8_t white = Drivers::PackedPixels::maxValue(pixelDepth);
+        for (uint16_t y = yStart; y < yEnd; ++y) {
+            uint8_t *row = imageBuffer + y * imageBufferWidth;
+            Drivers::PackedPixels::fillSpanMsb(row, xStart, xEnd, pixelDepth, white);
         }
     }
 }

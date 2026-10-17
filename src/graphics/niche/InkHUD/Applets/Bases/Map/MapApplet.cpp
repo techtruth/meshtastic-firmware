@@ -254,8 +254,14 @@ bool InkHUD::MapApplet::canZoomOut() const
     return false;
 }
 
-// Tiles are 1 bit/pixel, column-major: [bx=0..31][y=0..255], 8 pixels per byte.
-static uint8_t tileBuffer[::NicheGraphics::InkHUD::MapTileUtils::TILE_BYTES];
+static constexpr ::NicheGraphics::InkHUD::MapTileUtils::Format embeddedFormat{1};
+static uint8_t embeddedTileBuffer[embeddedFormat.tileBytes()];
+
+static bool embeddedTilesEnabled()
+{
+    const auto sdFormat = ::NicheGraphics::InkHUD::SDMapTiles::format();
+    return !sdFormat.valid() || sdFormat.bitsPerPixel == embeddedFormat.bitsPerPixel;
+}
 
 static bool usesGridTileLayout()
 {
@@ -301,16 +307,18 @@ static int tileTyAt(int tileIndex)
 
 static bool hasMapTileZoom(int zoom)
 {
-    const uint8_t *embeddedZooms = map_tile_zooms;
-    int embeddedCount = map_tile_count;
-    if (usesGridTileLayout()) {
-        embeddedZooms = map_tile_block_zooms;
-        embeddedCount = map_tile_block_count;
-    }
+    if (embeddedTilesEnabled()) {
+        const uint8_t *embeddedZooms = map_tile_zooms;
+        int embeddedCount = map_tile_count;
+        if (usesGridTileLayout()) {
+            embeddedZooms = map_tile_block_zooms;
+            embeddedCount = map_tile_block_count;
+        }
 
-    for (int i = 0; i < embeddedCount; i++)
-        if (embeddedZooms[i] == zoom)
-            return true;
+        for (int i = 0; i < embeddedCount; i++)
+            if (embeddedZooms[i] == zoom)
+                return true;
+    }
 
     return ::NicheGraphics::InkHUD::SDMapTiles::hasZoom(zoom);
 }
@@ -339,21 +347,21 @@ static bool hasMapTiles()
     return tileMetadataZoomCount() > 0;
 }
 
-static const uint8_t *decodeSparseTile(int tileIndex)
+static const uint8_t *decodeEmbeddedTile(int tileIndex)
 {
     const uint8_t kind = map_tile_kinds[tileIndex];
     if (kind == ::NicheGraphics::InkHUD::MapTileUtils::KIND_WHITE) {
-        memset(tileBuffer, 0x00, sizeof(tileBuffer));
-        return tileBuffer;
+        memset(embeddedTileBuffer, 0x00, sizeof(embeddedTileBuffer));
+        return embeddedTileBuffer;
     }
     if (kind == ::NicheGraphics::InkHUD::MapTileUtils::KIND_BLACK) {
-        memset(tileBuffer, 0xFF, sizeof(tileBuffer));
-        return tileBuffer;
+        memset(embeddedTileBuffer, 0xFF, sizeof(embeddedTileBuffer));
+        return embeddedTileBuffer;
     }
     const uint8_t *compressed = map_tile_data + map_tile_offsets[tileIndex];
-    const int decoded =
-        ::NicheGraphics::InkHUD::MapTileUtils::decompress(compressed, map_tile_sizes[tileIndex], tileBuffer, sizeof(tileBuffer));
-    return decoded == sizeof(tileBuffer) ? tileBuffer : nullptr;
+    const int decoded = ::NicheGraphics::InkHUD::MapTileUtils::decompress(compressed, map_tile_sizes[tileIndex],
+                                                                          embeddedTileBuffer, sizeof(embeddedTileBuffer));
+    return decoded == sizeof(embeddedTileBuffer) ? embeddedTileBuffer : nullptr;
 }
 
 static int findEmbeddedTile(int zoom, int tx, int ty)
@@ -415,11 +423,11 @@ void InkHUD::MapApplet::drawMapTileBackground(int zoom)
     for (int worldTx = minTx; worldTx <= maxTx; worldTx++) {
         const int fileTx = ((worldTx % tilesAtZoom) + tilesAtZoom) % tilesAtZoom;
         for (int ty = minTy; ty <= maxTy; ty++) {
-            const int embeddedTile = findEmbeddedTile(tileZoom, fileTx, ty);
-            const uint8_t *tile = embeddedTile >= 0 ? decodeSparseTile(embeddedTile) : nullptr;
-            if (!tile && ::NicheGraphics::InkHUD::SDMapTiles::readTile(tileZoom, fileTx, ty, tileBuffer, sizeof(tileBuffer)))
-                tile = tileBuffer;
-            if (!tile)
+            const int embeddedTile = embeddedTilesEnabled() ? findEmbeddedTile(tileZoom, fileTx, ty) : -1;
+            const uint8_t *embedded = embeddedTile >= 0 ? decodeEmbeddedTile(embeddedTile) : nullptr;
+            const auto sdTile = embedded ? ::NicheGraphics::InkHUD::MapTileUtils::TileView{}
+                                         : ::NicheGraphics::InkHUD::SDMapTiles::readTile(tileZoom, fileTx, ty);
+            if (!embedded && !sdTile)
                 continue;
 
             const float tileMinWx = worldTx * 256.0f;
@@ -437,8 +445,14 @@ void InkHUD::MapApplet::drawMapTileBackground(int zoom)
                     continue;
                 for (int sx = sxStart; sx <= sxEnd; sx++) {
                     const int px = (int)(gpxX + (sx - width() * 0.5f) * tileWorldPx - tileMinWx);
-                    if (px >= 0 && px <= 255 && (tile[(px / 8) * 256 + py] & (1 << (px % 8))))
-                        drawPixel(sx, sy, BLACK);
+                    if (px < 0 || px > 255)
+                        continue;
+                    if (embedded) {
+                        const bool black = embedded[(px / 8) * 256 + py] & (1 << (px % 8));
+                        drawPixel(sx, sy, black ? BLACK : WHITE);
+                    } else {
+                        drawPixel(sx, sy, static_cast<Color>(::NicheGraphics::InkHUD::MapTileUtils::pixelAt(sdTile, px, py)));
+                    }
                 }
             }
         }

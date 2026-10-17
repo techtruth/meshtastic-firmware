@@ -6,6 +6,7 @@
 #include "Throttle.h"
 #include "UptimeClock.h"
 #include "configuration.h"
+#include "graphics/niche/Drivers/EInk/EInk.h"
 
 #if defined(INKHUD_USE_SDCARD_MAP_TILES)
 
@@ -29,12 +30,8 @@ namespace
 {
 
 constexpr char MAP_PATH[] = "/Map/MapTile.bin";
-constexpr uint32_t HEADER_SIZE = 16;
-constexpr uint32_t POSITION_SIZE = 5;
-constexpr uint32_t PAYLOAD_SIZE = 7;
 constexpr uint32_t HEADER_RETRY_MS = 2000;
 constexpr uint32_t STREAMED_INDEX_ENTRIES_PER_BLOCK = 64;
-constexpr size_t MAX_COMPRESSED_TILE_SIZE = MapTileUtils::TILE_BYTES + MapTileUtils::TILE_BYTES / 255 + 16;
 static_assert(INKHUD_SD_MAP_INDEX_CACHE_PERCENT <= 50, "SD map index cache percentage cannot exceed 50");
 
 class SpiLockGuard
@@ -58,63 +55,53 @@ class SpiLockGuard
     bool usable;
 };
 
-struct Header {
+struct Header : MapTileUtils::ContainerHeader {
     bool checked = false;
     bool valid = false;
-    uint8_t layout = 0;
-    uint8_t gridColumns = 0;
-    uint8_t gridRows = 0;
-    uint8_t blockCount = 0;
-    uint32_t tileCount = 0;
-    uint32_t dataSize = 0;
-    uint32_t payloadOffset = 0;
-    uint32_t dataOffset = 0;
     uint32_t zoomMask = 0;
 };
 
 Header header;
+Drivers::EInk *display = nullptr;
 uint8_t *indexData = nullptr;
 uint32_t indexSize = 0;
 uint32_t mapFileSize = 0;
 uint32_t headerRetryAt = 0;
-uint8_t compressedTile[MAX_COMPRESSED_TILE_SIZE];
+uint8_t *compressedTile = nullptr;
+uint8_t *decodedTile = nullptr;
+size_t compressedTileSize = 0;
 
 uint16_t readLittleEndian16(const uint8_t *data)
 {
     return (uint16_t)data[0] | ((uint16_t)data[1] << 8);
 }
 
-uint32_t readLittleEndian32(const uint8_t *data)
+void releaseTileBuffers()
 {
-    return (uint32_t)data[0] | ((uint32_t)data[1] << 8) | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+    free(compressedTile);
+    free(decodedTile);
+    compressedTile = nullptr;
+    decodedTile = nullptr;
+    compressedTileSize = 0;
 }
 
-bool parseHeader(const uint8_t *rawHeader, uint32_t fileSize, Header &parsed)
+bool allocateTileBuffers(MapTileUtils::Format format)
 {
-    if (fileSize < HEADER_SIZE || memcmp(rawHeader, "MTB1", 4) != 0)
-        return false;
+    releaseTileBuffers();
+    const size_t decodedSize = format.tileBytes();
+    compressedTileSize = MapTileUtils::maxCompressedSize(format);
+#if defined(ARCH_ESP32)
+    decodedTile = static_cast<uint8_t *>(ps_malloc(decodedSize));
+    compressedTile = static_cast<uint8_t *>(ps_malloc(compressedTileSize));
+#else
+    decodedTile = static_cast<uint8_t *>(malloc(decodedSize));
+    compressedTile = static_cast<uint8_t *>(malloc(compressedTileSize));
+#endif
+    if (decodedTile && compressedTile)
+        return true;
 
-    parsed.layout = rawHeader[4];
-    parsed.gridColumns = rawHeader[5];
-    parsed.gridRows = rawHeader[6];
-    parsed.blockCount = rawHeader[7];
-    parsed.tileCount = readLittleEndian32(rawHeader + 8);
-    parsed.dataSize = readLittleEndian32(rawHeader + 12);
-    const uint32_t positionCount = parsed.layout == MapTileUtils::LAYOUT_GRID ? parsed.blockCount : parsed.tileCount;
-
-    const uint64_t payloadOffset = HEADER_SIZE + (uint64_t)positionCount * POSITION_SIZE;
-    const uint64_t dataOffset = payloadOffset + (uint64_t)parsed.tileCount * PAYLOAD_SIZE;
-    const uint64_t expectedSize = dataOffset + parsed.dataSize;
-    const bool layoutValid =
-        parsed.layout == MapTileUtils::LAYOUT_SPARSE ||
-        (parsed.layout == MapTileUtils::LAYOUT_GRID && parsed.gridColumns && parsed.gridRows && parsed.blockCount &&
-         parsed.tileCount == (uint32_t)parsed.gridColumns * parsed.gridRows * parsed.blockCount);
-    if (!layoutValid || dataOffset > UINT32_MAX || expectedSize > fileSize)
-        return false;
-
-    parsed.payloadOffset = payloadOffset;
-    parsed.dataOffset = dataOffset;
-    return true;
+    releaseTileBuffers();
+    return false;
 }
 
 bool readCached(uint32_t offset, uint8_t *buffer, size_t size)
@@ -156,8 +143,8 @@ void deferHeaderRetry(const char *reason)
 
 bool readPositionBlock(uint32_t firstEntry, uint32_t entryCount, uint8_t *buffer)
 {
-    const uint32_t offset = HEADER_SIZE + firstEntry * POSITION_SIZE;
-    const size_t size = entryCount * POSITION_SIZE;
+    const uint32_t offset = MapTileUtils::HEADER_SIZE + firstEntry * MapTileUtils::POSITION_SIZE;
+    const size_t size = entryCount * MapTileUtils::POSITION_SIZE;
     if (readCached(offset, buffer, size))
         return true;
     const bool readOk = readSdBlock(offset, buffer, size);
@@ -168,13 +155,13 @@ bool readPositionBlock(uint32_t firstEntry, uint32_t entryCount, uint8_t *buffer
 bool scanZoomMask(Header &parsed)
 {
     const uint32_t positionCount = parsed.layout == MapTileUtils::LAYOUT_GRID ? parsed.blockCount : parsed.tileCount;
-    uint8_t positions[STREAMED_INDEX_ENTRIES_PER_BLOCK * POSITION_SIZE];
+    uint8_t positions[STREAMED_INDEX_ENTRIES_PER_BLOCK * MapTileUtils::POSITION_SIZE];
     for (uint32_t first = 0; first < positionCount; first += STREAMED_INDEX_ENTRIES_PER_BLOCK) {
         const uint32_t count = min(STREAMED_INDEX_ENTRIES_PER_BLOCK, positionCount - first);
         if (!readPositionBlock(first, count, positions))
             return false;
         for (uint32_t i = 0; i < count; ++i) {
-            const uint8_t zoom = positions[i * POSITION_SIZE];
+            const uint8_t zoom = positions[i * MapTileUtils::POSITION_SIZE];
             if (zoom <= 22)
                 parsed.zoomMask |= 1UL << zoom;
         }
@@ -186,7 +173,7 @@ int findTile(int zoom, int x, int y)
 {
     const uint32_t positionCount = header.layout == MapTileUtils::LAYOUT_GRID ? header.blockCount : header.tileCount;
     const uint32_t tilesPerBlock = (uint32_t)header.gridColumns * header.gridRows;
-    uint8_t positions[STREAMED_INDEX_ENTRIES_PER_BLOCK * POSITION_SIZE];
+    uint8_t positions[STREAMED_INDEX_ENTRIES_PER_BLOCK * MapTileUtils::POSITION_SIZE];
     for (uint32_t first = 0; first < positionCount; first += STREAMED_INDEX_ENTRIES_PER_BLOCK) {
         const uint32_t count = min(STREAMED_INDEX_ENTRIES_PER_BLOCK, positionCount - first);
         if (!readPositionBlock(first, count, positions)) {
@@ -194,7 +181,7 @@ int findTile(int zoom, int x, int y)
             return -1;
         }
         for (uint32_t i = 0; i < count; ++i) {
-            const uint8_t *position = positions + i * POSITION_SIZE;
+            const uint8_t *position = positions + i * MapTileUtils::POSITION_SIZE;
             if (header.layout == MapTileUtils::LAYOUT_SPARSE) {
                 if (position[0] == zoom && readLittleEndian16(position + 1) == x && readLittleEndian16(position + 3) == y)
                     return first + i;
@@ -213,15 +200,19 @@ int findTile(int zoom, int x, int y)
 
 } // namespace
 
-void preload()
+void preload(Drivers::EInk *driver)
 {
+    if (driver)
+        display = driver;
+    if (!display)
+        return;
     if (header.checked || indexData)
         return;
     if (headerRetryAt && !Throttle::deadlinePassed(headerRetryAt))
         return;
     headerRetryAt = 0;
 
-    uint8_t rawHeader[HEADER_SIZE];
+    uint8_t rawHeader[MapTileUtils::HEADER_SIZE];
     uint32_t fileSize = 0;
     if (!readSdBlock(0, rawHeader, sizeof(rawHeader), &fileSize)) {
         deferHeaderRetry("header read failed");
@@ -229,8 +220,29 @@ void preload()
     }
 
     Header parsed;
-    if (!parseHeader(rawHeader, fileSize, parsed)) {
+    if (!MapTileUtils::parseHeader(rawHeader, fileSize, parsed)) {
         LOG_WARN("SD map: invalid tile index");
+        parsed.checked = true;
+        header = parsed;
+        return;
+    }
+
+    if (!display->supportsPixelDepth(parsed.format.bitsPerPixel)) {
+        LOG_WARN("SD map: MTB%u is not supported by this display", parsed.format.bitsPerPixel);
+        parsed.checked = true;
+        header = parsed;
+        return;
+    }
+    if (!allocateTileBuffers(parsed.format)) {
+        LOG_WARN("SD map: insufficient memory for MTB%u tile buffers", parsed.format.bitsPerPixel);
+        parsed.checked = true;
+        header = parsed;
+        return;
+    }
+    const uint8_t previousPixelDepth = display->pixelDepth();
+    if (!display->setPixelDepth(parsed.format.bitsPerPixel)) {
+        LOG_WARN("SD map: cannot select MTB%u after display initialization", parsed.format.bitsPerPixel);
+        releaseTileBuffers();
         parsed.checked = true;
         header = parsed;
         return;
@@ -261,6 +273,7 @@ void preload()
         }
         if (!cacheReadOk) {
             free(candidateIndex);
+            releaseTileBuffers();
             deferHeaderRetry("index preload failed");
             return;
         }
@@ -280,12 +293,26 @@ void preload()
         indexData = nullptr;
         indexSize = 0;
         mapFileSize = 0;
+        releaseTileBuffers();
         deferHeaderRetry("position index read failed");
         return;
     }
     parsed.valid = parsed.tileCount > 0 && parsed.zoomMask != 0;
+    if (!parsed.valid) {
+        display->setPixelDepth(previousPixelDepth);
+        free(indexData);
+        indexData = nullptr;
+        indexSize = 0;
+        mapFileSize = 0;
+        releaseTileBuffers();
+        parsed.valid = false;
+        parsed.checked = true;
+        header = parsed;
+        return;
+    }
     parsed.checked = true;
     header = parsed;
+    LOG_INFO("SD map: MTB%u ready (%lu-byte tiles)", header.format.bitsPerPixel, (unsigned long)header.format.tileBytes());
 }
 
 bool hasZoom(int zoom)
@@ -294,39 +321,43 @@ bool hasZoom(int zoom)
     return header.valid && zoom >= 0 && zoom <= 22 && (header.zoomMask & (1UL << zoom));
 }
 
-bool readTile(int zoom, int x, int y, uint8_t *destination, size_t destinationSize)
+MapTileUtils::Format format()
 {
-    if (!destination || destinationSize < MapTileUtils::TILE_BYTES || !hasZoom(zoom))
-        return false;
+    preload();
+    return header.valid ? header.format : MapTileUtils::Format{};
+}
+
+MapTileUtils::TileView readTile(int zoom, int x, int y)
+{
+    if (!decodedTile || !compressedTile || !hasZoom(zoom))
+        return {};
 
     const int tileIndex = findTile(zoom, x, y);
     if (tileIndex < 0)
-        return false;
+        return {};
 
-    uint8_t payload[PAYLOAD_SIZE];
-    const uint32_t payloadOffset = header.payloadOffset + tileIndex * PAYLOAD_SIZE;
+    uint8_t payload[MapTileUtils::PAYLOAD_SIZE];
+    const uint32_t payloadOffset = header.payloadOffset + tileIndex * MapTileUtils::PAYLOAD_SIZE;
     if (!readCached(payloadOffset, payload, sizeof(payload)) && !readSdBlock(payloadOffset, payload, sizeof(payload)))
-        return false;
+        return {};
 
-    const uint8_t kind = payload[0];
-    if (kind == MapTileUtils::KIND_WHITE || kind == MapTileUtils::KIND_BLACK) {
-        memset(destination, kind == MapTileUtils::KIND_BLACK ? 0xFF : 0x00, MapTileUtils::TILE_BYTES);
-        return true;
+    MapTileUtils::PayloadDescriptor descriptor;
+    if (!MapTileUtils::parsePayload(payload, header.dataSize, compressedTileSize, descriptor))
+        return {};
+    if (descriptor.kind == MapTileUtils::KIND_WHITE || descriptor.kind == MapTileUtils::KIND_BLACK) {
+        memset(decodedTile, descriptor.kind == MapTileUtils::KIND_WHITE ? 0xFF : 0x00, header.format.tileBytes());
+        return {decodedTile, header.format};
     }
 
-    const uint16_t compressedSize = readLittleEndian16(payload + 1);
-    const uint32_t dataOffset = readLittleEndian32(payload + 3);
-    if (kind != MapTileUtils::KIND_LZ4 || compressedSize == 0 || compressedSize > sizeof(compressedTile) ||
-        dataOffset > header.dataSize || compressedSize > header.dataSize - dataOffset)
-        return false;
-
-    if (!readSdBlock(header.dataOffset + dataOffset, compressedTile, compressedSize)) {
+    if (!readSdBlock(header.dataOffset + descriptor.dataOffset, compressedTile, descriptor.compressedSize)) {
         LOG_WARN("SD map: tile data read failed z%d/%d/%d", zoom, x, y);
-        return false;
+        return {};
     }
 
-    return MapTileUtils::decompress(compressedTile, compressedSize, destination, MapTileUtils::TILE_BYTES) ==
-           MapTileUtils::TILE_BYTES;
+    const int decoded =
+        MapTileUtils::decompress(compressedTile, descriptor.compressedSize, decodedTile, header.format.tileBytes());
+    return decoded == static_cast<int>(header.format.tileBytes()) ? MapTileUtils::TileView{decodedTile, header.format}
+                                                                  : MapTileUtils::TileView{};
 }
 
 } // namespace NicheGraphics::InkHUD::SDMapTiles
@@ -336,20 +367,25 @@ bool readTile(int zoom, int x, int y, uint8_t *destination, size_t destinationSi
 namespace NicheGraphics::InkHUD::SDMapTiles
 {
 
-void preload() {}
+void preload(Drivers::EInk *driver)
+{
+    (void)driver;
+}
 bool hasZoom(int zoom)
 {
     (void)zoom;
     return false;
 }
-bool readTile(int zoom, int x, int y, uint8_t *destination, size_t destinationSize)
+MapTileUtils::Format format()
+{
+    return {};
+}
+MapTileUtils::TileView readTile(int zoom, int x, int y)
 {
     (void)zoom;
     (void)x;
     (void)y;
-    (void)destination;
-    (void)destinationSize;
-    return false;
+    return {};
 }
 
 } // namespace NicheGraphics::InkHUD::SDMapTiles

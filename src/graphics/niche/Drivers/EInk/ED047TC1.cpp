@@ -2,13 +2,13 @@
 
     NicheGraphics parallel E-Ink driver for the LilyGo T5-S3-ePaper-Pro (ED047TC1).
 
-    InkHUD buffer format : 1bpp, horizontal bytes, MSB = leftmost pixel, 1 = white
-    FastEPD buffer format: 1bpp, horizontal bytes, MSB = leftmost pixel, 1 = white
+    InkHUD and FastEPD buffers use the selected native 1-bpp or 4-bpp mode.
+    Pixels are horizontal, MSB field first, 0 = black, maximum value = white.
 
-    Both formats share the same pixel layout and polarity (1 = white, 0 = black).
+    Both formats share the same pixel layout and polarity (maximum = white, 0 = black).
     The InkHUD safe-area buffer (928×508) is copied into the centre of the physical
     960×540 FastEPD buffer so content clears the panel's inactive edge border.
-    See ED047TC1.h for the H_OFFSET_BYTES / V_OFFSET_TOP / V_OFFSET_BOTTOM constants.
+    See ED047TC1.h for the H_OFFSET_PIXELS / V_OFFSET_TOP / V_OFFSET_BOTTOM constants.
 
 */
 
@@ -19,6 +19,7 @@
 
 #include "FastEPD.h"
 #include "configuration.h"
+#include "graphics/niche/Drivers/EInk/PackedPixels.h"
 
 using namespace NicheGraphics::Drivers;
 
@@ -172,6 +173,8 @@ void ED047TC1::begin(SPIClass *spi, uint8_t pin_dc, uint8_t pin_cs, uint8_t pin_
     const int modeRc = epaper->setMode(BB_MODE_1BPP);
     if (modeRc != BBEP_SUCCESS) {
         LOG_WARN("ED047TC1 setMode failed rc=%d", modeRc);
+    } else {
+        activePixelDepth = BPP_1;
     }
 
     const int clearRc = epaper->clearWhite();
@@ -187,31 +190,52 @@ void ED047TC1::begin(SPIClass *spi, uint8_t pin_dc, uint8_t pin_cs, uint8_t pin_
 
 void ED047TC1::update(uint8_t *imageData, UpdateTypes type)
 {
-    if (!epaper)
+    if (!epaper || !imageData)
         return;
+
+    const uint8_t depth = pixelDepth();
+    if (depth != BPP_1 && depth != BPP_4) {
+        LOG_ERROR("ED047TC1 unsupported pixel depth %u", depth);
+        return;
+    }
+    if (activePixelDepth != depth) {
+        const int modeRc = epaper->setMode(depth == BPP_4 ? BB_MODE_4BPP : BB_MODE_1BPP);
+        if (modeRc != BBEP_SUCCESS) {
+            LOG_ERROR("ED047TC1 setMode %ubpp failed rc=%d", depth, modeRc);
+            return;
+        }
+        activePixelDepth = depth;
+        type = FULL;
+    }
 
     // InkHUD renders into a DISPLAY_WIDTH × DISPLAY_HEIGHT safe-area buffer.
     // We need to place that into the centre of the physical 960×540 FastEPD buffer,
     // leaving blank margins at every edge to avoid the panel's inactive border.
-    const uint32_t srcRowBytes = (DISPLAY_WIDTH + 7) / 8; // bytes per row in InkHUD buffer (118)
-    const uint32_t dstRowBytes = (960 + 7) / 8;           // bytes per row in physical buffer (120)
+    const uint32_t srcRowBytes = PackedPixels::rowBytes(DISPLAY_WIDTH, depth);
+    const uint32_t dstRowBytes = PackedPixels::rowBytes(960, depth);
+    const uint32_t dstOffsetBytes = H_OFFSET_PIXELS * depth / 8;
     const uint32_t dstTotalRows = 540;
 
     uint8_t *cur = epaper->currentBuffer();
+    if (!cur) {
+        LOG_ERROR("ED047TC1 current buffer unavailable");
+        return;
+    }
 
-    // Fill physical buffer with white (0xFF = white in FastEPD 1bpp)
+    // All supported native modes encode a full byte of white as 0xFF.
     memset(cur, 0xFF, dstRowBytes * dstTotalRows);
 
     // Copy each InkHUD row into the physical buffer with horizontal + vertical offsets
     for (uint32_t row = 0; row < DISPLAY_HEIGHT; row++) {
         const uint8_t *srcRow = imageData + row * srcRowBytes;
-        uint8_t *dstRow = cur + (row + V_OFFSET_TOP) * dstRowBytes + H_OFFSET_BYTES;
+        uint8_t *dstRow = cur + (row + V_OFFSET_TOP) * dstRowBytes + dstOffsetBytes;
         memcpy(dstRow, srcRow, srcRowBytes);
     }
 
-    if (type == FULL) {
+    if (type == FULL || depth == BPP_4) {
         epaper->fullUpdate(CLEAR_SLOW, false);
-        epaper->backupPlane(); // Sync pPrevious so next partialUpdate has a correct baseline
+        if (depth == BPP_1)
+            epaper->backupPlane(); // Sync pPrevious so next partialUpdate has a correct baseline
     } else {
         // FAST: true partial update - compares pCurrent vs pPrevious and only applies
         // update waveform to rows that changed. partialUpdate() updates pPrevious.

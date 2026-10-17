@@ -3,6 +3,7 @@
 #include "./InkHUD.h"
 
 #include "./Applet.h"
+#include "./Applets/Bases/Map/SDMapTiles.h"
 #include "./Events.h"
 #include "./Persistence.h"
 #include "./Renderer.h"
@@ -37,6 +38,7 @@ InkHUD::InkHUD *InkHUD::InkHUD::getInstance()
 // Should happen in your variant's nicheGraphics.h file, before InkHUD::begin is called
 void InkHUD::InkHUD::setDriver(Drivers::EInk *driver)
 {
+    SDMapTiles::preload(driver);
     renderer->setDriver(driver);
 }
 

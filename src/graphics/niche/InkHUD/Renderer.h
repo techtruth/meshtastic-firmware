@@ -58,6 +58,7 @@ class Renderer : protected concurrency::OSThread
 
     // Apply the display rotation to handled pixels
     void rotatePixelCoords(int16_t *x, int16_t *y);
+    void writeBufferPixel(uint16_t x, uint16_t y, uint8_t color);
 
     // Execute the render process now, then hand off to driver for display update
     void render(bool async = true);
@@ -80,6 +81,7 @@ class Renderer : protected concurrency::OSThread
     uint16_t imageBufferHeight = 0;
     uint16_t imageBufferWidth = 0;
     uint32_t imageBufferSize = 0; // Bytes
+    uint8_t pixelDepth = Drivers::EInk::BPP_1;
 
     SystemApplet *lockRendering = nullptr; // Render this applet *only*
     SystemApplet *lockRequests = nullptr;  // Honor update requests from this applet *only*

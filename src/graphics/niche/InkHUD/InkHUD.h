@@ -21,11 +21,10 @@
 namespace NicheGraphics::InkHUD
 {
 
-// Color, understood by display controller IC (as bit values)
-// Also suitable for use as AdafruitGFX colors
+// Native luminance. Intermediate values are used only when the active display depth supports them.
 enum Color : uint8_t {
     BLACK = 0,
-    WHITE = 1,
+    WHITE = 15,
 };
 
 class Applet;

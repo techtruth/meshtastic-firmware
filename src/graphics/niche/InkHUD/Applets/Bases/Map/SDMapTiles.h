@@ -5,12 +5,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "MapTileUtils.h"
+
+namespace NicheGraphics::Drivers
+{
+class EInk;
+}
+
 namespace NicheGraphics::InkHUD::SDMapTiles
 {
 
-void preload();
+void preload(Drivers::EInk *driver = nullptr);
 bool hasZoom(int zoom);
-bool readTile(int zoom, int x, int y, uint8_t *destination, size_t destinationSize);
+MapTileUtils::Format format();
+MapTileUtils::TileView readTile(int zoom, int x, int y);
 
 } // namespace NicheGraphics::InkHUD::SDMapTiles
 
